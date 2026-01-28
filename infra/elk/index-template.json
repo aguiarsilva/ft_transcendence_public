@@ -1,0 +1,102 @@
+{
+  "index_patterns": ["app-logs-*"],
+  "settings": {
+    "index": {
+      "lifecycle": {
+        "name": "app-logs-policy",
+        "rollover_alias": "app-logs"
+      },
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "30s",
+      "max_result_window": 10000,
+      "codec": "best_compression",
+      "mapping": {
+        "total_fields": {
+          "limit": 2000
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "@timestamp": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "message": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "log": {
+        "properties": {
+          "level": {
+            "type": "integer"
+          },
+          "level_text": {
+            "type": "keyword"
+          },
+          "file": {
+            "properties": {
+              "path": {
+                "type": "keyword"
+              }
+            }
+          }
+        }
+      },
+      "service": {
+        "properties": {
+          "name": {
+            "type": "keyword"
+          }
+        }
+      },
+      "event": {
+        "properties": {
+          "dataset": {
+            "type": "keyword"
+          },
+          "category": {
+            "type": "keyword"
+          },
+          "module": {
+            "type": "keyword"
+          },
+          "ingested": {
+            "type": "date"
+          },
+          "hash": {
+            "type": "keyword"
+          }
+        }
+      },
+      "error": {
+        "type": "object",
+        "enabled": true
+      },
+      "audit": {
+        "properties": {
+          "processed_at": {
+            "type": "date"
+          },
+          "pipeline_version": {
+            "type": "keyword"
+          },
+          "data_classification": {
+            "type": "keyword"
+          }
+        }
+      },
+      "tags": {
+        "type": "keyword"
+      }
+    }
+  }
+}

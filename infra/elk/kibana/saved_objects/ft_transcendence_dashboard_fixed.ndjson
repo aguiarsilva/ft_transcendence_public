@@ -1,0 +1,2 @@
+{"type":"index-pattern","id":"app-logs","attributes":{"title":"app-logs-*","timeFieldName":"@timestamp","fields":"[]"}}
+{"type":"dashboard","id":"backend-logs-dashboard","version":1,"attributes":{"title":"Backend Logs Dashboard","description":"Backend application logs overview","timeRestore":false,"panels":[]}}

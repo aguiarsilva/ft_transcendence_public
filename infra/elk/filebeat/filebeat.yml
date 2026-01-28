@@ -1,0 +1,115 @@
+
+# Filebeat Configuration - Send Container Logs to Logstash
+filebeat.inputs:
+  # Read backend app logs from mounted volume
+  - type: filestream
+    id: backend-file-logs
+    enabled: true
+    paths:
+      - /backend/logs/*.log
+    symlinks: false
+    close_inactive: 30s
+    close_on_eof: false
+    # Parse JSON logs from Pino
+    json.message_key: msg
+    json.keys_under_root: true
+    json.add_error_key: true
+    
+# PROCESSORS: Data Enrichment & Security  
+processors:
+  - rename:
+      fields:
+        - from: "msg"
+          to: "message"
+        - from: "level"
+          to: "log.level"
+
+  # ===== REDACTION OF SENSITIVE DATA (PII, Secrets) =====
+  # Mask common sensitive patterns before transmission
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          // Redact JWT tokens, API keys, passwords
+          var msg = event.get("message") || "";
+          msg = msg.replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, "Bearer ***REDACTED***");
+          msg = msg.replace(/(?:api[_-]?key|token|password)\s*[:=]\s*[^\s,;)"]*/gi, "$& ***REDACTED***");
+          // Redact email addresses (partial PII redaction)
+          msg = msg.replace(/([a-zA-Z0-9._%+-]+@)[a-zA-Z0-9.-]+/g, "$1***REDACTED***.com");
+          // Redact potential credit card numbers
+          msg = msg.replace(/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g, "****-****-****-****");
+          event.put("message", msg);
+        }
+
+  # ===== DROP UNNECESSARY FIELDS =====
+  - drop_fields:
+      fields: 
+        - "pid"           # Process ID not needed in centralized logs
+        - "hostname"      # Redundant with container info
+        - "host"          # Container host info
+        - "agent"         # Filebeat agent details (not needed)
+
+  # ===== ADD ENRICHMENT FIELDS =====
+  - add_fields:
+      target: ''
+      fields:
+        service.name: backend
+        event.dataset: backend.logs
+        event.module: filebeat
+        event.category: "log"
+        # Add log source identifier
+        log.file.path: /backend/logs/backend.log
+
+  # ===== ADD TIMESTAMP PRECISION =====
+  - add_fields:
+      target: 'event'
+      fields:
+        ingested: "{{ .timestamp }}"
+
+# OUTPUT: Logstash with Security
+output.logstash:
+  enabled: true
+  hosts: 
+    - "${LOGSTASH_HOST}:${LOGSTASH_PORT}"
+  
+  # ===== AUTHENTICATION =====
+  username: "${ELASTIC_USERNAME}"
+  password: "${ELASTIC_PASSWORD}"
+  
+  # ===== SSL/TLS SECURITY =====
+  # Note: Logstash uses TCP (beats protocol), not HTTPS
+  # Add mutual TLS if needed (requires Logstash SSL setup)
+  # ssl.certificate_authorities: ["/usr/share/filebeat/certs/ca.crt"]
+  # ssl.certificate: "/usr/share/filebeat/certs/filebeat.crt"
+  # ssl.key: "/usr/share/filebeat/certs/filebeat.key"
+  # ssl.verification_mode: "certificate"
+
+  # ===== PERFORMANCE & RELIABILITY =====
+  pipelining: 2
+  compression_level: 4
+  bulk_max_size: 2048
+  max_retries: 3
+  timeout: 30s
+  backoff:
+    init: 1s
+    max: 60s
+
+# OUTPUT: Ship logs to Logstash
+output.logstash:
+  hosts: ["logstash:5000"]
+  bulk_max_size: 100
+  worker: 1
+
+# LOGGING
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 7
+  permissions: 0640
+
+# DATA SECURITY
+max_procs: 4
+filebeat.registry.flush: 5s
+filebeat.registry.file_permissions: 0640

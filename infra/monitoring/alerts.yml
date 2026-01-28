@@ -1,0 +1,76 @@
+groups:
+  - name: backend_alerts
+    rules:
+
+      # Test alert - will fire immediately to verify alerting works
+      - alert: TestAlert
+        expr: vector(1)
+        for: 10s
+        labels:
+          severity: info
+        annotations:
+          summary: "Test Alert - Alerting System is Working"
+          description: "This is a test alert to verify the Prometheus alerting system is functioning correctly."
+
+      - alert: HighHttpErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx rate"
+          description: "More than 5% of requests are failing with 5xx in the last 5 minutes."
+
+      - alert: SlowHttpRequests
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow HTTP requests"
+          description: "95th percentile HTTP request duration exceeds 1 second."
+
+      - alert: TooManyActiveUsers
+        expr: active_users > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of active users"
+          description: "There are more than 500 active users currently logged in."
+
+      - alert: TooManyActiveMatches
+        expr: active_matches > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of active matches"
+          description: "There are more than 100 active matches currently running."
+
+      - alert: TooManyActiveTournaments
+        expr: active_tournaments > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of active tournaments"
+          description: "There are more than 20 active tournaments currently ongoing."
+
+      - alert: HighWebSocketLatency
+        expr: websocket_latency_seconds_sum / websocket_latency_seconds_count > 0.5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High WebSocket latency"
+          description: "Average WebSocket latency exceeded 0.5 seconds."
+
+      - alert: HighFriendRequests
+        expr: friend_requests_total > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of friend requests"
+          description: "More than 1000 friend requests are pending in the system."

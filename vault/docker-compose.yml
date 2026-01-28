@@ -1,0 +1,299 @@
+services:
+  sqlite:
+    image: alpine:3.20
+    container_name: ft_transcendence_sqlite
+    command: ["sh", "-c", "mkdir -p /data && touch /data/data.sqlite && chmod 666 /data/data.sqlite && tail -f /dev/null"]
+    volumes:
+      - sqlite_data:/data
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ft_transcendence_app
+    ports:
+      - "3001:3001"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - sqlite_data:/data
+      - ./backend/public/avatars:/app/backend/public/avatars
+      - ./backend/logs:/app/backend/logs
+      - ./certs:/app/certs:ro
+    restart: unless-stopped
+    depends_on:
+      - sqlite
+      - elasticsearch
+    networks:
+      - monitoring
+      - elk-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ft_transcendence_frontend
+    ports:
+      - "3000:443"
+    env_file:
+      - ./frontend/.env
+    volumes:
+      - ./certs:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # vault:
+  #   build: ./vault
+  #   container_name: vault
+  #   ports:
+  #     - "8200:8200"
+  #   env_file:
+  #     - ./backend/.env
+  #   cap_add:
+  #     - IPC_LOCK
+  #   restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.authc.api_key.enabled=true
+      - xpack.security.authc.token.enabled=true
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.keystore.path=certs/elasticsearch.keystore.p12
+      - xpack.security.transport.ssl.keystore.password=${KEYSTORE_PASSWORD}
+      - xpack.security.transport.ssl.truststore.path=certs/elasticsearch.truststore.p12
+      - xpack.security.transport.ssl.truststore.password=${KEYSTORE_PASSWORD}
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.keystore.path=certs/elasticsearch.keystore.p12
+      - xpack.security.http.ssl.keystore.password=${KEYSTORE_PASSWORD}
+      - xpack.security.http.ssl.truststore.path=certs/elasticsearch.truststore.p12
+      - xpack.security.http.ssl.truststore.password=${KEYSTORE_PASSWORD}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}
+      - xpack.watcher.enabled=true
+      - xpack.ml.enabled=true
+      - indices.memory.index_buffer_size=30%
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+      - ./infra/elk/certs:/usr/share/elasticsearch/config/certs:ro
+    networks:
+      - elk-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -k https://localhost:9200 -u elastic:${ELASTIC_PASSWORD} | grep -q 'You Know, for Search'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    env_file: ./infra/elk/.env.elk
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: "https://elasticsearch:9200"
+      ELASTICSEARCH_USERNAME: "kibana_system"
+      ELASTICSEARCH_PASSWORD: "${KIBANA_PASSWORD}"
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: "/usr/share/kibana/config/certs/ca.crt"
+      ELASTICSEARCH_SSL_VERIFICATIONMODE: "none"
+      SERVER_SSL_ENABLED: "true"
+      SERVER_SSL_KEYSTORE_PATH: "/usr/share/kibana/config/certs/kibana.p12"
+      SERVER_SSL_KEYSTORE_PASSWORD: "${KEYSTORE_PASSWORD}"
+      XPACK_SECURITY_ENABLED: "true"
+      XPACK_REPORTING_ENCRYPTIONKEY: "${KIBANA_ENCRYPTION_KEY}"
+    volumes:
+      - ./infra/elk/certs:/usr/share/kibana/config/certs:ro
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.14.0
+    container_name: logstash
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./infra/elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./infra/elk/certs:/usr/share/logstash/config/certs:ro
+    environment:
+      - ELASTIC_HOSTS=https://elasticsearch:9200
+      - ELASTIC_USERNAME=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_PASSWORD}
+      - ELASTIC_CA_CERTS=/usr/share/logstash/config/certs/ca.crt
+      - LS_LOG_LEVEL=warn
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9600"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  filebeat:
+    image: elastic/filebeat:8.14.0
+    user: root
+    volumes:
+      - ./infra/elk/filebeat/filebeat.yml:/tmp/filebeat-host.yml:ro
+      - ./backend/logs:/backend/logs:ro
+      - ./infra/elk/filebeat/entrypoint.sh:/usr/local/bin/filebeat-entrypoint.sh:ro
+      - ./infra/elk/certs:/usr/share/filebeat/certs:ro
+    environment:
+      - LOGSTASH_HOST=logstash
+      - LOGSTASH_PORT=5000
+      - ELASTIC_USERNAME=filebeat_internal
+      - ELASTIC_PASSWORD=${FILEBEAT_PASSWORD}
+    entrypoint: ["/usr/local/bin/filebeat-entrypoint.sh"]
+    networks:
+      - elk-network
+    depends_on:
+      logstash:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Monitoring stack (Prometheus + Grafana + node_exporter)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=10GB'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "4000:3000"
+    env_file:
+      - ./infra/monitoring/.env
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_DATABASE_TYPE=sqlite3
+      - GF_DATABASE_PATH=/var/lib/grafana/grafana.db
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  node_exporter:
+    image: prom/node-exporter:latest
+    container_name: node_exporter
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring
+    restart: unless-stopped
+  security-setup:
+    image: curlimages/curl:latest
+    container_name: elk-security-setup
+    volumes:
+      - ./infra/elk/setup-security.sh:/tmp/setup-security.sh:ro
+      - ./infra/elk/certs:/tmp/certs:ro
+    entrypoint: ["/tmp/setup-security.sh"]
+    environment:
+      - ELASTICSEARCH_HOST=https://elasticsearch:9200
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD}
+      - FILEBEAT_PASSWORD=${FILEBEAT_PASSWORD}
+      - AUDITOR_PASSWORD=${AUDITOR_PASSWORD}
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+
+  setup:
+    image: curlimages/curl:latest
+    volumes:
+      - ./infra/elk/ilm-policy.json:/tmp/ilm-policy.json:ro
+      - ./infra/elk/index-template.json:/tmp/index-template.json:ro
+      - ./infra/elk/setup-ilm.sh:/tmp/setup-ilm.sh:ro
+      - ./infra/elk/certs:/tmp/certs:ro
+    entrypoint: ["/bin/sh", "/tmp/setup-ilm.sh"]
+    environment:
+      - ELASTICSEARCH_HOST=https://elasticsearch:9200
+      - ELASTIC_USERNAME=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTICSEARCH_CA_CERTS=/tmp/certs/ca.crt
+    networks:
+      - elk-network
+    depends_on:
+      security-setup:
+        condition: service_completed_successfully
+    restart: "no"
+
+  kibana-setup:
+    image: curlimages/curl:latest
+    container_name: elk-kibana-setup
+    volumes:
+      - ./infra/elk/kibana/setup-kibana.sh:/usr/local/bin/setup-kibana.sh:ro
+      - ./infra/elk/kibana/saved_objects:/saved_objects:ro
+      - ./infra/elk/certs:/tmp/certs:ro
+    entrypoint: ["/usr/local/bin/setup-kibana.sh"]
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+    networks:
+      - elk-network
+    depends_on:
+      kibana:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  esdata:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  sqlite_data:
+    driver: local
+
+networks:
+  elk-network:
+    driver: bridge
+  monitoring:
+    driver: bridge

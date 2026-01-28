@@ -1,0 +1,192 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: elasticsearch
+    environment:
+      # ===== SECURITY HARDENING =====
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.authc.api_key.enabled=true
+      - xpack.security.authc.token.enabled=true
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.keystore.path=certs/elasticsearch.keystore.p12
+      - xpack.security.transport.ssl.keystore.password=${KEYSTORE_PASSWORD:-changeme}
+      - xpack.security.transport.ssl.truststore.path=certs/elasticsearch.truststore.p12
+      - xpack.security.transport.ssl.truststore.password=${KEYSTORE_PASSWORD:-changeme}
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.keystore.path=certs/elasticsearch.keystore.p12
+      - xpack.security.http.ssl.keystore.password=${KEYSTORE_PASSWORD:-changeme}
+      - xpack.security.http.ssl.truststore.path=certs/elasticsearch.truststore.p12
+      - xpack.security.http.ssl.truststore.password=${KEYSTORE_PASSWORD:-changeme}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+      - KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-changeme}
+      # ===== DATA PROTECTION =====
+      - xpack.watcher.enabled=true
+      - xpack.ml.enabled=true
+      - indices.memory.index_buffer_size=30%
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+      - ./certs:/usr/share/elasticsearch/config/certs:ro
+    networks:
+      - elk-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s https://localhost:9200 -u elastic:${ELASTIC_PASSWORD:-changeme} --cacert /usr/share/elasticsearch/config/certs/ca.crt | grep -q 'You Know, for Search'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    env_file: .env.elk
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: "https://elasticsearch:9200"
+      ELASTICSEARCH_USERNAME: "kibana_system"
+      ELASTICSEARCH_PASSWORD: "${KIBANA_PASSWORD:-changeme}"
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: "/usr/share/kibana/config/certs/ca.crt"
+      ELASTICSEARCH_SSL_VERIFICATIONMODE: "certificate"
+      SERVER_SSL_ENABLED: "true"
+      SERVER_SSL_KEYSTORE_PATH: "/usr/share/kibana/config/certs/kibana.p12"
+      SERVER_SSL_KEYSTORE_PASSWORD: "${KEYSTORE_PASSWORD:-changeme}"
+      XPACK_SECURITY_ENABLED: "true"
+      XPACK_REPORTING_ENCRYPTIONKEY: "${KIBANA_ENCRYPTION_KEY:-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6}"
+    volumes:
+      - ./certs:/usr/share/kibana/config/certs:ro
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -s https://localhost:5601/api/status | grep -1 '\"overall\":{\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.14.0
+    container_name: logstash
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./certs:/usr/share/logstash/config/certs:ro
+    environment:
+      - ELASTIC_HOSTS=https://elasticsearch:9200
+      - ELASTIC_USERNAME=logstash_internal
+      - ELASTIC_PASSWORD=${LOGSTASH_PASSWORD:-changeme}
+      - ELASTIC_CA_CERTS=/usr/share/logstash/config/certs/ca.crt
+      - LS_LOG_LEVEL=warn
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9600"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  filebeat:
+    image: elastic/filebeat:8.14.0
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/tmp/filebeat-host.yml:ro
+      - ../../backend/logs:/backend/logs:ro
+      - ./filebeat/entrypoint.sh:/usr/local/bin/filebeat-entrypoint.sh:ro
+      - ./certs:/usr/share/filebeat/certs:ro
+    environment:
+      - LOGSTASH_HOST=logstash
+      - LOGSTASH_PORT=5000
+      - ELASTIC_USERNAME=filebeat_internal
+      - ELASTIC_PASSWORD=${FILEBEAT_PASSWORD:-changeme}
+    entrypoint: ["/usr/local/bin/filebeat-entrypoint.sh"]
+    networks:
+      - elk-network
+    depends_on:
+      logstash:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Security initialization: create users, roles, and audit policies
+  security-setup:
+    image: curlimages/curl:latest
+    container_name: elk-security-setup
+    volumes:
+      - ./setup-security.sh:/tmp/setup-security.sh:ro
+      - ./certs:/tmp/certs:ro
+    entrypoint: ["/tmp/setup-security.sh"]
+    environment:
+      - ELASTICSEARCH_HOST=https://elasticsearch:9200
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD:-changeme}
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD:-changeme}
+      - FILEBEAT_PASSWORD=${FILEBEAT_PASSWORD:-changeme}
+      - AUDITOR_PASSWORD=${AUDITOR_PASSWORD:-changeme}
+    networks:
+      - elk-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+
+  # Auto-setup: register ILM policy, index template, and data retention policies
+  setup:
+    image: curlimages/curl:latest
+    volumes:
+      - ./ilm-policy.json:/tmp/ilm-policy.json:ro
+      - ./index-template.json:/tmp/index-template.json:ro
+      - ./setup-ilm.sh:/tmp/setup-ilm.sh:ro
+      - ./certs:/tmp/certs:ro
+    entrypoint: ["/bin/sh", "/tmp/setup-ilm.sh"]
+    environment:
+      - ELASTICSEARCH_HOST=https://elasticsearch:9200
+      - ELASTIC_USERNAME=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+      - ELASTICSEARCH_CA_CERTS=/tmp/certs/ca.crt
+    networks:
+      - elk-network
+    depends_on:
+      security-setup:
+        condition: service_completed_successfully
+    restart: "no"
+
+  #set the dashboards and visualization for Kibana
+  kibana-setup:
+    image: curlimages/curl:latest
+    container_name: elk-kibana-setup
+    volumes:
+      - ./kibana/setup-kibana.sh:/usr/local/bin/setup-kibana.sh:ro
+      - ./kibana/saved_objects:/saved_objects:ro
+      - ./certs:/tmp/certs:ro
+    entrypoint: ["/usr/local/bin/setup-kibana.sh"]
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
+    networks:
+      - elk-network
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  esdata:
+    driver: local
+
+networks:
+  elk-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
