@@ -2,7 +2,9 @@
 
 A full-stack, real-time multiplayer Pong game with **3D graphics, tournament system, and enterprise-grade monitoring**. Built as a Single Page Application demonstrating modern web development practices, containerization, and production-ready architecture.
 
-> 🎥 **[Watch Demo Video](https://github.com/user-attachments/assets/1643b3be-552c-4acb-90f0-718dee9423fc)** *(Add your video link here)*
+## 🎥 Demo
+
+https://github.com/user-attachments/assets/1643b3be-552c-4acb-90f0-718dee9423fc
 
 ---
 
